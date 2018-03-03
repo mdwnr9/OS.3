@@ -12,7 +12,7 @@
 #include <ctype.h>
 #include <sys/sem.h>
 
-//Global Variables - do define
+//Global Variables 
  static int clock_segment_id;
  static int* clock_shared_memory;
  static int message_segment_id;
@@ -24,6 +24,7 @@
 
 //Prototypes
 static int create_timer(int time);
+int detachandremove (int shmid, void* shmaddr);
 
 //getopt flags
 
@@ -71,10 +72,38 @@ int main(int argc, char* argv[]) {
   }
 
 
-//If statemets go here
+//Options for getopt
+if (help_flag) {
+    print_help_message(argv[0], max_inital_slaves, log_file, max_run_time, max_sim_time);
+    exit(EXIT_SUCCESS);
+  }
 
+ if (max_inital_slaves < 1) {
+    fprintf(stderr, "Invalid argument for option -s\n");
+    exit(EXIT_SUCCESS);
+  }
 
+  if (max_run_time < 1) {
+    fprintf(stderr, "Invalid argument for option -t\n");
+    exit(EXIT_SUCCESS);
+  }
 
+  if (max_sim_time < 1) {
+    fprintf(stderr, "Invalid argument for option -m\n");
+    exit(EXIT_SUCCESS);
+  }
+
+  if (setup_interrupt() == -1) {
+    perror("Failed to set up handler for SIGPROF");
+    return EXIT_FAILURE;
+  }
+
+  if (setup_interval_timer(max_run_time) == -1) {
+    perror("Faled to set up the ITIMER_PROF interval timer");
+    return EXIT_FAILURE;
+  }
+
+/*Open the log file*/
 fp = fopen(log_file, "w+");
 
   if (fp == NULL) {
@@ -87,66 +116,15 @@ signal(SIGINT, free_shared_memory_and_abort);
 signal(SIGCHLD, handle_child_termination);
 
 //Shared memory
-get_shared_memory();
-attach_to_shared_memory();
+/*Create shared memory*/
+ if ((shmid = shmget(SHM_KEY, sizeof(shared_memory_object_t), IPC_CREAT | 0600)) < 0) {
+        perror("Error: shmget");
+        exit(errno);
+    }
 
 
 return 0;
 
-}
-
-/*Function to create interval timer*/
-/*static int create_timer(int time){
-   struct itimer t;
-   t.it_interval.tv_sec = time;
-   t.it_interval.tv_usec = 0;
-   t.it_value = value.it_interval;
-   return (setitimer(ITIMER_PROF, &t, NULL));
-   
-}*/
-
-/*Another way to implement the system clock*/
-/*void clock_incrementation_function(system_clock_t *destinationClock, system_clock_t sourceClock, int additional_nano_seconds) {
-    destinationClock->nano_seconds = sourceClock.nano_seconds + additional_nano_seconds;
-    if(destinationClock->nano_seconds > 1000000000) {
-        destinationClock->seconds++;
-        destinationClock->nano_seconds -= 1000000000;
-    }
-}*/
-  
-
-
-/*Detach shared memory and remove shared memory segment*/
-int detachandremove (int shmid, void* shmaddr){
-    int error = 0;
-
-    if (shmdt(shmaddr) == - 1)
-        error = errno;
-    if ((shmctl(shmid, IPC_RMID, NULL) == -1) && !error)
-        error = errno;
-    if (!error)
-        return 0;
-    errno = error;
-    return -1;
-}
-
-void terminate_child(int signum) {
-  int status;
-  pid_t pid = wait(&status);
-
-  fprintf(
-    fp,
-    "[Master] Child %d is terminating at my time %d:%d because it reached %d:%d in slave\n",
-    pid,
-    *clock_shared_memory,
-    *(clock_shared_memory + 1),
-    *(message_shared_memory),
-    *(message_shared_memory + 1)
-  );
-
-  empty_message();
-  fork_and_exec_child();
-  num_slaves_completed++;
 }
 
 
