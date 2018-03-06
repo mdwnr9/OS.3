@@ -92,7 +92,7 @@ int main() {
     }
     
     else if(pid == 0){
-    int clock_id_arr[5]
+    int clock_id_arr[5];
 	    clock_id_arr[i] = pid; 
     printf("Printing the clock id, %d", clock_id);
     printf("child can read shared memory...\n");
@@ -111,6 +111,8 @@ wait(&status);
      printf("Clock has removed its shared memory...\n");
      printf("Clock  exits...\n");
      exit(0);
+	 
+}	 
 
 
 return 0;
