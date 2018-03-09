@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <sys/time.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -10,43 +11,47 @@
 #include <sys/shm.h>
 #include <sys/stat.h>
 #include <ctype.h>
-#include <sys/sem.h>
+#include "oss.h"
 
-//Global Variables 
- static int clock_segment_id;
- static int* clock_shared_memory;
- static int message_segment_id;
- static int* message_shared_memory;
- int num_slaves_completed = 0;
- const int MAX_SLAVES = 100;
- FILE* fp;
- const int NANO_SECONDS_PER_SECOND = 1000000000;
+/* This flag controls termination of the main loop. */
+volatile sig_atomic_t keep_going = 1;
+
+/* The signal handler just clears the flag and re-enables itself. */
+void catch_alarm (int sig)
+{
+  keep_going = 0;
+  signal (sig, catch_alarm);
+}
 
 //Prototypes
-static int create_timer(int time);
-int detachandremove (int shmid, void* shmaddr);
+void fork_exec();
 
-//getopt flags
-
+//Global Variables 
+int clock_id; //This will hold the id for the shared memory portion of the Clock struct - shmget
+int message_queue_id;
+int msgflg;
+Clock *shm_time_ptr; //pointer to shared memory address of clock struct--> should it be an int ptr? - shmat
+pid_t pid;
+int status;
 
 int main(int argc, char* argv[]) {
+	
+  //Flags for getopt	
   int help_flag = 0;
-  int max_inital_slaves = 5;
-  char* log_file = "oss.out";
+  int max_children = 5;
+  char* log_file = "log";
   int max_run_time = 20;
   int max_sim_time = 2;
   opterr = 0;
   int c;
-
-
-
+  
   while ((c = getopt(argc, argv, "hs:l:t:m:")) != -1) {
     switch (c) {
       case 'h':
         help_flag = 1;
         break;
       case 's':
-        max_inital_slaves = atoi(optarg);
+        max_children = atoi(optarg);
         break;
       case 'l':
         log_file = optarg;
@@ -58,73 +63,150 @@ int main(int argc, char* argv[]) {
         max_sim_time = atoi(optarg);
         break;
       case '?':
-        if (is_required_argument(optopt)) {
-          print_required_argument_message(optopt);
-        } else if (isprint(optopt)) {
-          fprintf(stderr, "Unknown option `-%c'.\n", optopt);
-        } else {
-          fprintf(stderr, "Unknown option character `\\x%x'.\n", optopt);
+		 if (optopt == 's' || optopt == 'l' || optopt == 't')
+                    fprintf(stderr, "Option %c requires an argument.\n", optopt);
+                else
+                    fprintf(stderr, "Unknown option -%c\n", optopt);
+                return -1;
         }
-        return EXIT_FAILURE;
-      default:
-        abort();
+}
+
+	if (help_flag == 1)
+    {
+        printf("'-h' Help menu\n");
+        printf("'-s x' Number of child processes spawned (default value = %d)\n", max_children);
+        printf("'-l' This sets the name of the logfile");
+        printf("'-t z' Total amounnt of seconds that will pass until the master process kills itself and all the children (default value = %d)\n", max_run_time);
+        exit(0);
+	}
+  
+  
+  //This is for message
+  msgflg = IPC_CREAT|0777;
+  size_t message_length;
+  
+  
+
+/* Establish a handler for SIGALRM signals. */
+  signal (SIGALRM, catch_alarm);
+
+/* Set an alarm to go off in a little while. */
+  alarm (10);
+
+  
+/*****Shared memory*****/
+/*Allocating shared memory for a clock struct.
+The clock struct is in oss.h and it has two integers:
+seconds and nanoseconds. the SHMKEY is also in oss.h
+to ensure I use the same key in oss and user
+ I am also setting permissions*/
+ clock_id = shmget ( SHMKEY, sizeof(Clock), 0777 | IPC_CREAT );
+  if (clock_id == -1) {
+    perror("Failed to get shared memory");
+    exit(1);
+  }
+   printf("Created  shared memory for clock struct...\n");
+
+  //Attach to clock shared memory segment
+   shm_time_ptr =  shmat(clock_id, 0, 0);
+   
+    if(shm_time_ptr == -1) {
+        perror("could not attach to memory....shmat error");
+        exit(1);
+   }
+
+     
+   printf("Attached clock shared memory...\n");
+   
+   
+   //Initialize Clock
+   shm_time_ptr->seconds = 0;
+   shm_time_ptr->nano_seconds = 0;
+   
+   
+  /*Master creates a message queue with msget. 
+  It gets a key that is defined in oss.h so oss
+  and user have the same key. The message_queue_id it 
+  returns can be used to access the message queue*/
+   (void) fprintf(stderr, "\nmsgget: Calling msgget from OSS(%#lx,\
+     %#o)\n",
+    MSGKEY, msgflg);
+
+    if ((message_queue_id = msgget(MSGKEY, IPC_CREAT | 0600)) < 0) {
+        perror("Error: msgget");
+        exit(1);
     }
-  }
+    else 
+     (void) fprintf(stderr,"msgget: msgget in OSS succeeded: message_queue_id = %d\n", message_queue_id);
 
+ /*
+     * Sending message type 1 from OSS
+     */
+     
+    myMessage.mtype = 1;
+    
+    (void) fprintf(stderr,"msgget: msgget succeeded: msqid = %d\n", message_queue_id);
+    
+    (void) strcpy(myMessage.mtext, "Did you get this?");
+    
+    (void) fprintf(stderr,"msgget: msgget succeeded: msqid = %d\n", message_queue_id);
+    
+    message_length = strlen(myMessage.mtext) + 1 ;
+    
+    
 
-//Options for getopt
-if (help_flag) {
-    print_help_message(argv[0], max_inital_slaves, log_file, max_run_time, max_sim_time);
-    exit(EXIT_SUCCESS);
-  }
-
- if (max_inital_slaves < 1) {
-    fprintf(stderr, "Invalid argument for option -s\n");
-    exit(EXIT_SUCCESS);
-  }
-
-  if (max_run_time < 1) {
-    fprintf(stderr, "Invalid argument for option -t\n");
-    exit(EXIT_SUCCESS);
-  }
-
-  if (max_sim_time < 1) {
-    fprintf(stderr, "Invalid argument for option -m\n");
-    exit(EXIT_SUCCESS);
-  }
-
-  if (setup_interrupt() == -1) {
-    perror("Failed to set up handler for SIGPROF");
-    return EXIT_FAILURE;
-  }
-
-  if (setup_interval_timer(max_run_time) == -1) {
-    perror("Faled to set up the ITIMER_PROF interval timer");
-    return EXIT_FAILURE;
-  }
-
-/*Open the log file*/
-fp = fopen(log_file, "w+");
-
-  if (fp == NULL) {
-    perror("Failed to open log file");
-    exit(EXIT_FAILURE);
-  }
-
-//Signal handlng
-signal(SIGINT, free_shared_memory_and_abort);
-signal(SIGCHLD, handle_child_termination);
-
-//Shared memory
-/*Create shared memory*/
- if ((shmid = shmget(SHM_KEY, sizeof(shared_memory_object_t), IPC_CREAT | 0600)) < 0) {
-        perror("Error: shmget");
-        exit(errno);
+    /*
+     * Send a message.
+     */
+    if (msgsnd(message_queue_id, &myMessage, message_length, 0) < 0) {
+       printf ("%d, %d, %s, %d\n", message_queue_id, myMessage.mtype, myMessage.mtext, message_length);
+        perror("msgsnd");
+        exit(1);
     }
 
+   else 
+      printf("Message: \"%s\" Sent\n", myMessage.mtext);
+      
+    
+  printf("About to fork a child ...\n");
+//Fork and exec a child ---> I will change this to several children instead of one child
+  for(int i = 0; i < 2; i++){
+  fork_exec();    
+  sleep(3);
+  }
+  
+   
+//Detach & remove from shared memory 
+wait(&status);
+     printf("Child has completed...\n");
+     shmdt((void *) shm_time_ptr);
+     printf("time has detached  its shared memory...\n");
+     shmctl(clock_id, IPC_RMID, NULL);
+     printf("time has removed its shared memory...\n");
+     printf("time  exits...\n");
+     exit(0);
+	 
+
+   
+   msgctl(message_queue_id, IPC_RMID, NULL);
 
 return 0;
 
 }
 
+/*This function forks one child and execs it to user.*/
 
+void fork_exec(){
+pid_t pid = fork();
+    if (pid < 0) {
+      perror("Failed to fork");
+      exit(1);
+    }
+    
+    else if(pid == 0){
+    printf("I am child in OSS and I am about to exec...\n");
+	execlp("./user",(char*) NULL); 	
+		perror("Failed to exec");
+        exit(-1);
+	 }
+}
